@@ -14,6 +14,20 @@ MINERALS = {
 ASTEROID_BELTS = ['Belt1', 'Belt2', 'Belt3']
 STATIONS = ['Station1', 'Station2']
 
+# Add this dictionary
+STATION_MINERAL_PRICES = {
+    'Station1': {
+        'Veldspar': 12,
+        'Scordite': 18,
+        'Pyroxeres': 28,
+    },
+    'Station2': {
+        'Veldspar': 11,
+        'Scordite': 19,
+        'Pyroxeres': 29,
+    },
+}
+
 class SingleSystemSoloAgentEnv(gym.Env):
     def __init__(self):
         super(SingleSystemSoloAgentEnv, self).__init__()
@@ -64,6 +78,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
             'cargo': np.zeros(len(MINERALS), dtype=np.int32),
             'position': 'Station1',
             'miners': np.zeros(2, dtype=np.int8),
+            'account_balance': 0,
         }
 
         observation = self._get_obs()
@@ -123,6 +138,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
         print("Current Position:", self.ship_state['position'])
         print("Cargo Hold:", self.ship_state['cargo'])
         print("Miners Status:", self.ship_state['miners'])
+        print("Account Balance:", self.ship_state['account_balance'], "ISK")
         print("Local Objects:", self.local_state['objects'])
 
     def _warp(self, target_id):
@@ -167,14 +183,32 @@ class SingleSystemSoloAgentEnv(gym.Env):
 
     def _sell_minerals(self):
         total_earnings = 0
+        
+        # Get the current station
+        current_station = self.ship_state['position']
+        
+        # Check if the ship is at a station with specific prices
+        if current_station in STATION_MINERAL_PRICES:
+            prices = STATION_MINERAL_PRICES[current_station]
+            print(f"Selling minerals at {current_station} with station-specific prices.")
+        else:
+            prices = MINERALS  # Default to base prices if not at a known station
+            print(f"Selling minerals at {current_station} with default prices.")
+        
+        # Sell minerals using the appropriate prices
         for idx, quantity in enumerate(self.ship_state['cargo']):
             if quantity > 0:
                 mineral = list(MINERALS.keys())[idx]
-                price = MINERALS[mineral]
-                total_earnings += quantity * price
-                print(f"Sold {quantity} units of {mineral} for {quantity * price} ISK")
-                self.ship_state['cargo'][idx] = 0
+                price = prices.get(mineral, MINERALS[mineral])
+                total_sale = quantity * price
+                total_earnings += total_sale
+                print(f"Sold {quantity} units of {mineral} for {total_sale} ISK at {current_station}")
+                self.ship_state['cargo'][idx] = 0  # Empty the cargo for this mineral
+        
+        # Update account balance
+        self.ship_state['account_balance'] += total_earnings
         print(f"Total Earnings: {total_earnings} ISK")
+        print(f"Updated Account Balance: {self.ship_state['account_balance']} ISK")
         return total_earnings
 
     def _regenerate_belt_resources(self):
@@ -219,9 +253,9 @@ def draw_environment(screen, env, step_number):
     title_text = font.render(f"Step {step_number} - EVE Mining Environment", True, WHITE)
     screen.blit(title_text, (20, 20))
 
-    # Draw ship's position
-    ship_pos_text = font.render(f"Ship Position: {env.ship_state['position']}", True, GREEN)
-    screen.blit(ship_pos_text, (20, 60))
+    # Draw account balance
+    account_balance_text = font.render(f"Account Balance: {env.ship_state['account_balance']} ISK", True, GREEN)
+    screen.blit(account_balance_text, (20, 60))
 
     # Draw cargo hold
     cargo_text = "\n".join([f"{mineral}: {qty}" for mineral, qty in zip(MINERALS.keys(), env.ship_state['cargo'])])
@@ -233,7 +267,7 @@ def draw_environment(screen, env, step_number):
         cargo_y += 20
 
     # Draw local objects
-    local_text = font.render("Local Objects:", True, BLUE)
+    local_text = font.render("Local Objects", True, BLUE)
     screen.blit(local_text, (20, cargo_y + 20))
     local_objects = env.local_state['objects']
     if local_objects:
@@ -246,27 +280,34 @@ def draw_environment(screen, env, step_number):
 
     system_x = 300
 
+    # Dictionary to hold positions of belts and stations
+    locations_positions = {}
+
     # Draw asteroid belts
     belt_x = system_x
     belt_y = 200
 
-    system_text = font.render("System", True, WHITE)
-    screen.blit(system_text, (system_x + 10, belt_y - 20))
-    
+    system_text = font.render("Solar System", True, WHITE)
+    screen.blit(system_text, (system_x + 10, belt_y - 40))
+
     for belt in ASTEROID_BELTS:
-        belt_rect = pygame.Rect(belt_x, belt_y, 100, 50)
+        belt_rect = pygame.Rect(belt_x, belt_y + 10, 100, 50)
         pygame.draw.rect(screen, GRAY, belt_rect)
         belt_text = font.render(belt, True, WHITE)
-        screen.blit(belt_text, (belt_x + 10, belt_y + 10))
+        screen.blit(belt_text, (belt_x + 10, belt_y + 20))
 
+        # Store the position of the belt
+        locations_positions[belt] = (belt_x + 50, belt_y + 35)  # Center of the belt rectangle
+
+        # Display belt resources
         belt_resources = env.belt_resources[belt]
         if belt_resources:
             for i, asteroid in enumerate(belt_resources[:3]):  # Display up to 3 resources
                 resource_text = font.render(f"{asteroid['mineral']} ({asteroid['quantity']})", True, GREEN)
-                screen.blit(resource_text, (belt_x + 10, belt_y + 30 + i * 20))
+                screen.blit(resource_text, (belt_x + 10, belt_y + 70 + i * 20))
         else:
             empty_text = font.render("Empty", True, RED)
-            screen.blit(empty_text, (belt_x + 10, belt_y + 30))
+            screen.blit(empty_text, (belt_x + 10, belt_y + 70))
 
         belt_x += 150
 
@@ -274,11 +315,40 @@ def draw_environment(screen, env, step_number):
     station_x = system_x
     station_y = 500
     for station in STATIONS:
-        station_rect = pygame.Rect(station_x, station_y, 100, 50)
+        station_rect = pygame.Rect(station_x, station_y, 120, 50)
         pygame.draw.rect(screen, BLUE, station_rect)
         station_text = font.render(station, True, WHITE)
         screen.blit(station_text, (station_x + 10, station_y + 10))
+
+        # Store the position of the station
+        locations_positions[station] = (station_x + 60, station_y + 25)  # Center of the station rectangle
+
+        # Display mineral prices under each station
+        if station in STATION_MINERAL_PRICES:
+            prices = STATION_MINERAL_PRICES[station]
+            price_y = station_y + 60
+            for mineral, price in prices.items():
+                price_text = font.render(f"{mineral}: {price} ISK", True, WHITE)
+                screen.blit(price_text, (station_x, price_y))
+                price_y += 20
+        else:
+            no_price_text = font.render("No price data", True, RED)
+            screen.blit(no_price_text, (station_x, station_y + 60))
+
         station_x += 150
+
+    # Draw the ship at its current position
+    ship_location = env.ship_state['position']
+    if ship_location in locations_positions:
+        ship_x, ship_y = locations_positions[ship_location]
+        # Draw a simple triangle to represent the ship
+        pygame.draw.polygon(
+            screen, RED, [
+                (ship_x, ship_y - 15),     # Top point
+                (ship_x - 10, ship_y + 10),  # Bottom left
+                (ship_x + 10, ship_y + 10)   # Bottom right
+            ]
+        )
 
     # Update the screen
     pygame.display.flip()
@@ -310,9 +380,17 @@ def run_environment(env):
         elif step_number == 2:
             action = {'action_type': 0, 'target': len(ASTEROID_BELTS), 'miner_id': None}  # Warp to Station1
         elif step_number == 3:
-            action = {'action_type': 5, 'target': None, 'miner_id': None}  # Sell minerals
-        else:
+            action = {'action_type': 5, 'target': None, 'miner_id': None}  # Sell minerals at Station1
+        elif step_number == 4:
             action = {'action_type': 0, 'target': 1, 'miner_id': None}  # Warp to Belt2
+        elif step_number == 5:
+            action = {'action_type': 1, 'target': 0, 'miner_id': 0}  # Mine first asteroid
+        elif step_number == 6:
+            action = {'action_type': 0, 'target': len(ASTEROID_BELTS) + 1, 'miner_id': None}  # Warp to Station2
+        elif step_number == 7:
+            action = {'action_type': 5, 'target': None, 'miner_id': None}  # Sell minerals at Station2
+        else:
+            action = {'action_type': 4, 'target': None, 'miner_id': None}  # Empty Cargo (for demonstration)
 
         obs, reward, done, truncated, info = env.step(action)
 
