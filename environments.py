@@ -28,14 +28,29 @@ STATION_MINERAL_PRICES = {
     },
 }
 
+# Add this dictionary for fuel prices
+STATION_FUEL_PRICES = {
+    'Station1': 5,  # ISK per unit of energy
+    'Station2': 6,
+}
+
+# Energy constants
+MAX_ENERGY = 100
+ENERGY_REGEN_RATE = 5  # Energy regenerated per step
+ENERGY_COSTS = {
+    'warp': 15,
+    'mine': 10,
+    'move': 5,
+}
+
 class SingleSystemSoloAgentEnv(gym.Env):
     def __init__(self):
         super(SingleSystemSoloAgentEnv, self).__init__()
 
-        # Action space
+        # Update the action space to include the new action type
         self.action_space = spaces.Dict({
-            'action_type': spaces.Discrete(6),  # 0: Warp, 1: Mine, 2: Move, 3: Dock, 4: Empty Cargo, 5: Sell Minerals
-            'target': spaces.Discrete(10),      # Target ID (asteroid, station, etc.)
+            'action_type': spaces.Discrete(7),  # 0: Warp, ..., 6: Buy Fuel
+            'target': spaces.Discrete(10),      # Target ID or amount
             'miner_id': spaces.Discrete(2),     # Miner ID (if applicable)
         })
 
@@ -79,6 +94,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
             'position': 'Station1',
             'miners': np.zeros(2, dtype=np.int8),
             'account_balance': 0,
+            'energy': MAX_ENERGY,  # Add energy attribute
         }
 
         observation = self._get_obs()
@@ -91,21 +107,50 @@ class SingleSystemSoloAgentEnv(gym.Env):
         info = {}
 
         action_type = action['action_type']
-        target = action['target']
+        target = action.get('target', None)
         miner_id = action.get('miner_id', None)
 
-        if action_type == 0:  # Warp
-            self._warp(target)
-        elif action_type == 1:  # Mine
-            self._mine(miner_id, target)
-        elif action_type == 2:  # Move
-            self._move(target)
-        elif action_type == 3:  # Dock
-            self._dock(target)
-        elif action_type == 4:  # Empty Cargo
-            self._empty_cargo()
-        elif action_type == 5:  # Sell Minerals
-            reward += self._sell_minerals()
+        # Regenerate energy at the beginning of the step
+        self.ship_state['energy'] = min(
+            self.ship_state['energy'] + ENERGY_REGEN_RATE,
+            MAX_ENERGY
+        )
+
+        # Energy cost mapping
+        action_energy_costs = {
+            0: ENERGY_COSTS['warp'],   # Warp
+            1: ENERGY_COSTS['mine'],   # Mine
+            2: ENERGY_COSTS['move'],   # Move
+            3: 0,                      # Dock (no energy cost)
+            4: 0,                      # Empty Cargo (no energy cost)
+            5: 0,                      # Sell Minerals (no energy cost)
+            6: 0,                      # Buy Fuel (no energy cost)
+        }
+
+        energy_cost = action_energy_costs.get(action_type, 0)
+
+        # Check if there's enough energy
+        if self.ship_state['energy'] >= energy_cost:
+            # Deduct energy cost
+            self.ship_state['energy'] -= energy_cost
+
+            # Perform the action
+            if action_type == 0:  # Warp
+                self._warp(target)
+            elif action_type == 1:  # Mine
+                self._mine(miner_id, target)
+            elif action_type == 2:  # Move
+                self._move(target)
+            elif action_type == 3:  # Dock
+                self._dock(target)
+            elif action_type == 4:  # Empty Cargo
+                self._empty_cargo()
+            elif action_type == 5:  # Sell Minerals
+                reward += self._sell_minerals()
+            elif action_type == 6:  # Buy Fuel
+                self._buy_fuel()
+        else:
+            print("Not enough energy to perform this action.")
 
         # Regenerate resources occasionally
         if random.random() < 0.1:  # 10% chance to regenerate in this step
@@ -130,6 +175,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
                 'cargo': cargo_array,
                 'position': self.ship_state['position'],
                 'miners': self.ship_state['miners'],
+                'energy': self.ship_state['energy'],  # Include energy in observations
             },
         }
         return observation
@@ -139,6 +185,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
         print("Cargo Hold:", self.ship_state['cargo'])
         print("Miners Status:", self.ship_state['miners'])
         print("Account Balance:", self.ship_state['account_balance'], "ISK")
+        print("Energy Level:", self.ship_state['energy'], "/", MAX_ENERGY)
         print("Local Objects:", self.local_state['objects'])
 
     def _warp(self, target_id):
@@ -228,6 +275,32 @@ class SingleSystemSoloAgentEnv(gym.Env):
     def close(self):
         pass
 
+    def _buy_fuel(self):
+        """Allows the ship to purchase fuel (energy) at the current station."""
+        current_station = self.ship_state['position']
+        if current_station in STATIONS:
+            # Get fuel price at the current station
+            fuel_price = STATION_FUEL_PRICES.get(current_station, None)
+            if fuel_price is not None:
+                # Calculate the amount of energy needed to reach MAX_ENERGY
+                energy_needed = MAX_ENERGY - self.ship_state['energy']
+                if energy_needed > 0:
+                    total_cost = energy_needed * fuel_price
+                    if self.ship_state['account_balance'] >= total_cost:
+                        # Deduct the cost and refill energy
+                        self.ship_state['account_balance'] -= total_cost
+                        self.ship_state['energy'] = MAX_ENERGY
+                        print(f"Bought {energy_needed} units of fuel for {total_cost} ISK at {current_station}")
+                        print(f"Updated Account Balance: {self.ship_state['account_balance']} ISK")
+                    else:
+                        print("Not enough ISK to buy fuel.")
+                else:
+                    print("Energy is already full.")
+            else:
+                print("No fuel available at this station.")
+        else:
+            print("Cannot buy fuel outside of a station.")
+
 import pygame
 import sys
 
@@ -238,12 +311,13 @@ GRAY = (169, 169, 169)
 GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
 RED = (255, 0, 0)
+YELLOW = (255, 255, 0)
 
 # Screen dimensions
 WIDTH = 1500
 HEIGHT = 1000
 
-def draw_environment(screen, env, step_number):
+def draw_environment(screen, env, step_number, current_action):
     """Draw the current state of the environment."""
     # Clear the screen
     screen.fill(BLACK)
@@ -253,14 +327,22 @@ def draw_environment(screen, env, step_number):
     title_text = font.render(f"Step {step_number} - EVE Mining Environment", True, WHITE)
     screen.blit(title_text, (20, 20))
 
+    # Display current action
+    action_text = font.render(f"Current Action: {current_action}", True, YELLOW)
+    screen.blit(action_text, (20, 60))
+
     # Draw account balance
     account_balance_text = font.render(f"Account Balance: {env.ship_state['account_balance']} ISK", True, GREEN)
-    screen.blit(account_balance_text, (20, 60))
+    screen.blit(account_balance_text, (20, 100))
+
+    # Draw energy level
+    energy_text = font.render(f"Energy Level: {env.ship_state['energy']} / {MAX_ENERGY}", True, RED)
+    screen.blit(energy_text, (20, 140))
 
     # Draw cargo hold
     cargo_text = "\n".join([f"{mineral}: {qty}" for mineral, qty in zip(MINERALS.keys(), env.ship_state['cargo'])])
     cargo_lines = cargo_text.split("\n")
-    cargo_y = 100
+    cargo_y = 180
     for line in cargo_lines:
         cargo_line_text = font.render(line, True, WHITE)
         screen.blit(cargo_line_text, (20, cargo_y))
@@ -290,6 +372,7 @@ def draw_environment(screen, env, step_number):
     system_text = font.render("Solar System", True, WHITE)
     screen.blit(system_text, (system_x + 10, belt_y - 40))
 
+    belt_spacing = 250  # Spacing between belts
     for belt in ASTEROID_BELTS:
         belt_rect = pygame.Rect(belt_x, belt_y + 10, 100, 50)
         pygame.draw.rect(screen, GRAY, belt_rect)
@@ -309,11 +392,13 @@ def draw_environment(screen, env, step_number):
             empty_text = font.render("Empty", True, RED)
             screen.blit(empty_text, (belt_x + 10, belt_y + 70))
 
-        belt_x += 150
+        belt_x += belt_spacing  # Increase horizontal spacing between belts
 
     # Draw stations
     station_x = system_x
     station_y = 500
+
+    station_spacing = 250  # Spacing between stations
     for station in STATIONS:
         station_rect = pygame.Rect(station_x, station_y, 120, 50)
         pygame.draw.rect(screen, BLUE, station_rect)
@@ -324,29 +409,39 @@ def draw_environment(screen, env, step_number):
         locations_positions[station] = (station_x + 60, station_y + 25)  # Center of the station rectangle
 
         # Display mineral prices under each station
+        price_y = station_y + 60
         if station in STATION_MINERAL_PRICES:
             prices = STATION_MINERAL_PRICES[station]
-            price_y = station_y + 60
             for mineral, price in prices.items():
                 price_text = font.render(f"{mineral}: {price} ISK", True, WHITE)
                 screen.blit(price_text, (station_x, price_y))
                 price_y += 20
+
+        # Display fuel price
+        fuel_price = STATION_FUEL_PRICES.get(station, None)
+        if fuel_price is not None:
+            fuel_price_text = font.render(f"Fuel: {fuel_price} ISK/unit", True, WHITE)
+            screen.blit(fuel_price_text, (station_x, price_y))
+            price_y += 20
         else:
-            no_price_text = font.render("No price data", True, RED)
-            screen.blit(no_price_text, (station_x, station_y + 60))
+            no_fuel_text = font.render("No fuel available", True, RED)
+            screen.blit(no_fuel_text, (station_x, price_y))
+            price_y += 20
 
-        station_x += 150
+        station_x += station_spacing  # Increase horizontal spacing between stations
 
-    # Draw the ship at its current position
+    # Draw the ship to the right of its current location
     ship_location = env.ship_state['position']
     if ship_location in locations_positions:
         ship_x, ship_y = locations_positions[ship_location]
+        ship_offset_x = 70  # Horizontal offset to move the ship to the right
+        ship_offset_y = 0   # Vertical offset (if needed)
         # Draw a simple triangle to represent the ship
         pygame.draw.polygon(
             screen, RED, [
-                (ship_x, ship_y - 15),     # Top point
-                (ship_x - 10, ship_y + 10),  # Bottom left
-                (ship_x + 10, ship_y + 10)   # Bottom right
+                (ship_x + ship_offset_x, ship_y - 15 + ship_offset_y),     # Top point
+                (ship_x - 10 + ship_offset_x, ship_y + 10 + ship_offset_y),  # Bottom left
+                (ship_x + 10 + ship_offset_x, ship_y + 10 + ship_offset_y)   # Bottom right
             ]
         )
 
@@ -372,7 +467,7 @@ def run_environment(env):
             if event.type == pygame.QUIT:
                 running = False
 
-        # Example action sequence for testing
+        # Updated action sequence for testing
         if step_number == 0:
             action = {'action_type': 0, 'target': 0, 'miner_id': None}  # Warp to Belt1
         elif step_number == 1:
@@ -382,20 +477,27 @@ def run_environment(env):
         elif step_number == 3:
             action = {'action_type': 5, 'target': None, 'miner_id': None}  # Sell minerals at Station1
         elif step_number == 4:
-            action = {'action_type': 0, 'target': 1, 'miner_id': None}  # Warp to Belt2
+            action = {'action_type': 6, 'target': None, 'miner_id': None}  # Buy Fuel at Station1
         elif step_number == 5:
-            action = {'action_type': 1, 'target': 0, 'miner_id': 0}  # Mine first asteroid
+            action = {'action_type': 0, 'target': 1, 'miner_id': None}  # Warp to Belt2
         elif step_number == 6:
-            action = {'action_type': 0, 'target': len(ASTEROID_BELTS) + 1, 'miner_id': None}  # Warp to Station2
+            action = {'action_type': 1, 'target': 0, 'miner_id': 0}  # Mine first asteroid
         elif step_number == 7:
+            action = {'action_type': 0, 'target': len(ASTEROID_BELTS) + 1, 'miner_id': None}  # Warp to Station2
+        elif step_number == 8:
             action = {'action_type': 5, 'target': None, 'miner_id': None}  # Sell minerals at Station2
+        elif step_number == 9:
+            action = {'action_type': 6, 'target': None, 'miner_id': None}  # Buy Fuel at Station2
         else:
             action = {'action_type': 4, 'target': None, 'miner_id': None}  # Empty Cargo (for demonstration)
 
+        # Get a description of the current action
+        action_description = get_action_description(action)
+
         obs, reward, done, truncated, info = env.step(action)
 
-        # Draw the environment
-        draw_environment(screen, env, step_number)
+        # Pass the action description to draw_environment
+        draw_environment(screen, env, step_number, action_description)
 
         # Increment step counter
         step_number += 1
@@ -405,3 +507,22 @@ def run_environment(env):
 
     pygame.quit()
     sys.exit()
+
+def get_action_description(action):
+    """Generate a human-readable description of the action."""
+    action_names = {
+        0: 'Warp',
+        1: 'Mine',
+        2: 'Move',
+        3: 'Dock',
+        4: 'Empty Cargo',
+        5: 'Sell Minerals',
+        6: 'Buy Fuel'
+    }
+    action_type = action['action_type']
+    action_name = action_names.get(action_type, 'Unknown')
+
+    target = action.get('target', 'N/A')
+    miner_id = action.get('miner_id', 'N/A')
+
+    return f"{action_name}, Target: {target}, Miner ID: {miner_id}"
