@@ -6,7 +6,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from collections import deque
-from environments import SingleSystemSoloAgentEnv, ASTEROID_BELTS, STATIONS, MINERALS, draw_environment
+
+from dqn_env import SingleSystemSoloAgentEnv, ASTEROID_BELTS, STATIONS, MINERALS, draw_environment
 
 # Colors
 BLACK = (0, 0, 0)
@@ -237,7 +238,7 @@ def run_dqn_agent(env, num_episodes=500, render=True):
             # Draw the environment only if rendering is enabled
             if render:
                 action_description = get_action_description(action)
-                draw_environment(screen, env, step_number, action_description)
+                draw_environment(screen, env, step_number, action_description, episode)
                 clock.tick(60)  # Control the frame rate
 
         episode_rewards.append(total_reward)
@@ -309,7 +310,7 @@ def evaluate_dqn_agent(env, agent, num_episodes=10):
 
             # Draw the environment
             action_description = get_action_description(action)
-            draw_environment(screen, env, step_number, action_description)
+            draw_environment(screen, env, step_number, action_description, 1)
 
             # Control the frame rate
             clock.tick(60)  # Adjust the number to control the speed (frames per second)
@@ -318,7 +319,7 @@ def evaluate_dqn_agent(env, agent, num_episodes=10):
         account_balances_per_episode.append(account_balances)
         print(f"Evaluation Episode {episode + 1}/{num_episodes}, Total Reward: {total_reward}")
 
-    pygame.quit()
+    pygame.quit()  # Ensure Pygame is properly quit after evaluation
 
     average_reward = sum(episode_rewards) / num_episodes
     print(f"Average Reward over {num_episodes} Evaluation Episodes: {average_reward}")
@@ -349,7 +350,7 @@ if __name__ == "__main__":
     env = SingleSystemSoloAgentEnv()
 
     # Train the agent
-    episode_rewards, account_balances_per_episode = run_dqn_agent(env, num_episodes=500)
+    episode_rewards, account_balances_per_episode = run_dqn_agent(env, num_episodes=50)
 
     # Load the trained model for evaluation
     observation_space_size = preprocess_state(env.reset()[0]).shape[0]
@@ -362,21 +363,22 @@ if __name__ == "__main__":
     # Evaluate the agent
     evaluation_episode_rewards, evaluation_account_balances_per_episode = evaluate_dqn_agent(env, trained_agent, num_episodes=10)
 
-    # Plotting the training performance
+    # Plotting the training and evaluation performance
     import matplotlib.pyplot as plt
 
     # Plot the account balance over time during training
-    plt.figure()
-    for idx, balances in enumerate(account_balances_per_episode):
+    plt.figure(figsize=(10, 6))
+    # To avoid overcrowding the plot, plot only the first 10 episodes
+    for idx, balances in enumerate(account_balances_per_episode[:10]):
         plt.plot(balances, label=f'Episode {idx+1}')
     plt.xlabel('Time Steps')
     plt.ylabel('Account Balance')
-    plt.title('Profit Over Time During Training')
+    plt.title('Profit Over Time During Training (First 10 Episodes)')
     plt.legend()
     plt.show()
 
     # Plot the episode rewards during training
-    plt.figure()
+    plt.figure(figsize=(10, 6))
     plt.plot(episode_rewards)
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
@@ -384,7 +386,7 @@ if __name__ == "__main__":
     plt.show()
 
     # Plot the account balance over time during evaluation
-    plt.figure()
+    plt.figure(figsize=(10, 6))
     for idx, balances in enumerate(evaluation_account_balances_per_episode):
         plt.plot(balances, label=f'Evaluation Episode {idx+1}')
     plt.xlabel('Time Steps')
@@ -394,7 +396,7 @@ if __name__ == "__main__":
     plt.show()
 
     # Plot the episode rewards during evaluation
-    plt.figure()
+    plt.figure(figsize=(10, 6))
     plt.plot(evaluation_episode_rewards)
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
