@@ -45,33 +45,42 @@ ENERGY_COSTS = {
 
 MAX_STEPS_PER_EPISODE = 150
 
+# Define the list of possible actions
+ACTIONS = [
+    {'action_type': 0, 'target': 0, 'miner_id': None},  # Warp to Belt1
+    {'action_type': 0, 'target': 1, 'miner_id': None},  # Warp to Belt2
+    {'action_type': 0, 'target': 2, 'miner_id': None},  # Warp to Belt3
+    {'action_type': 0, 'target': 3, 'miner_id': None},  # Warp to Station1
+    {'action_type': 0, 'target': 4, 'miner_id': None},  # Warp to Station2
+    {'action_type': 1, 'target': 0, 'miner_id': 0},     # Mine asteroid 0
+    {'action_type': 1, 'target': 1, 'miner_id': 0},     # Mine asteroid 1
+    {'action_type': 1, 'target': 2, 'miner_id': 0},     # Mine asteroid 2
+    {'action_type': 5, 'target': None, 'miner_id': None},  # Sell minerals
+    {'action_type': 6, 'target': None, 'miner_id': None},  # Buy Fuel
+    {'action_type': 4, 'target': None, 'miner_id': None},  # Empty Cargo
+    {'action_type': 7, 'target': None, 'miner_id': None},  # Wait
+    # Add more actions as needed
+]
+
 class SingleSystemSoloAgentEnv(gym.Env):
     def __init__(self):
         super(SingleSystemSoloAgentEnv, self).__init__()
 
-        # Update the action space to include the new action type
-        self.action_space = spaces.Dict({
-            'action_type': spaces.Discrete(7),  # 0: Warp, ..., 6: Buy Fuel
-            'target': spaces.Discrete(10),      # Target ID or amount
-            'miner_id': spaces.Discrete(2),     # Miner ID (if applicable)
-        })
+        # Update the action space to be discrete
+        self.action_space = spaces.Discrete(len(ACTIONS))
 
-        # Observation space
-        self.observation_space = spaces.Dict({
-            'system_state': spaces.Dict({
-                'locations': spaces.MultiDiscrete([len(ASTEROID_BELTS), len(STATIONS)]),
-            }),
-            'local_state': spaces.Dict({
-                'objects': spaces.MultiDiscrete([100]),  # IDs of nearby objects
-            }),
-            'ship_state': spaces.Dict({
-                'cargo': spaces.Box(low=0, high=1000, shape=(len(MINERALS),), dtype=np.int32),
-                'position': spaces.Discrete(10),  # Simplified position
-                'miners': spaces.MultiBinary(2),  # Status of miners (0: idle, 1: active)
-                'energy': spaces.Box(low=0, high=MAX_ENERGY, shape=(1,), dtype=np.int32),  # Energy level
-                'account_balance': spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.int32),
-            }),
-        })
+        # Observation space dimensions
+        num_minerals = len(MINERALS)
+        num_positions = len(ASTEROID_BELTS + STATIONS)
+        num_miners = len(np.zeros(2, dtype=np.int8))
+        observation_size = num_minerals + num_positions + num_miners + 1 + 1 + 1  # cargo + position + miners + energy + account_balance + local_objects_count
+
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(observation_size,),
+            dtype=np.float32
+        )
 
         # System-wide state: Map each belt to its resources
         self.belt_resources = {belt: self.generate_asteroids() for belt in ASTEROID_BELTS}
@@ -84,7 +93,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
         super().reset(seed=seed)
         self.step_count = 0  # Reset step counter
 
-        # **Regenerate asteroid belts**
+        # Regenerate asteroid belts
         self.belt_resources = {belt: self.generate_asteroids() for belt in ASTEROID_BELTS}
 
         # Initialize system state
@@ -103,18 +112,21 @@ class SingleSystemSoloAgentEnv(gym.Env):
             'position': 'Station1',
             'miners': np.zeros(2, dtype=np.int8),
             'account_balance': 0,
-            'energy': MAX_ENERGY,  # Add energy attribute
+            'energy': MAX_ENERGY,
         }
 
         observation = self._get_obs()
         info = {}
         return observation, info
 
-    def step(self, action):
+    def step(self, action_idx):
         self.step_count += 1  # Increment step counter
         done = False
         reward = 0
         info = {}
+
+        # Get the action dictionary from the action index
+        action = ACTIONS[action_idx]
 
         action_type = action['action_type']
         target = action.get('target', None)
@@ -128,7 +140,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
             3: 0,                      # Dock (no energy cost)
             4: 0,                      # Empty Cargo (no energy cost)
             5: 0,                      # Sell Minerals (no energy cost)
-            6: 0,                      # Buy Fuel (no energy cost)
+            6: 0,                      # Buy Fuel (no energy cost),
         }
 
         energy_cost = action_energy_costs.get(action_type, 0)
@@ -160,6 +172,11 @@ class SingleSystemSoloAgentEnv(gym.Env):
             elif action_type == 6:  # Buy Fuel
                 buy_fuel_reward = self._buy_fuel()
                 reward += buy_fuel_reward
+            elif action_type == 7:  # Wait
+                print("Waiting to regenerate energy.")
+                # Regenerate more energy when waiting
+                self.ship_state['energy'] = min(self.ship_state['energy'] + ENERGY_REGEN_RATE * 2, MAX_ENERGY)
+                reward -= 0.5  # Small penalty for waiting
             else:
                 print("Unknown action type.")
                 reward -= 5  # Penalty for invalid action type
@@ -181,6 +198,40 @@ class SingleSystemSoloAgentEnv(gym.Env):
             done = True
 
         return observation, reward, done, False, info
+
+    def _get_obs(self):
+        # Encode cargo
+        cargo = self.ship_state['cargo']
+
+        # Encode position as one-hot vector
+        positions = ASTEROID_BELTS + STATIONS
+        position_enc = np.zeros(len(positions))
+        position_idx = positions.index(self.ship_state['position'])
+        position_enc[position_idx] = 1
+
+        # Encode miners' status
+        miners_status = self.ship_state['miners']
+
+        # Encode energy level (normalize between 0 and 1)
+        energy = np.array([self.ship_state['energy'] / MAX_ENERGY])
+
+        # Encode account balance (you can normalize or cap if necessary)
+        account_balance = np.array([self.ship_state['account_balance']])
+
+        # Encode local objects (e.g., count of asteroids)
+        local_objects_count = np.array([len(self.local_state['objects'])])
+
+        # Concatenate all features into a single flat array
+        observation = np.concatenate([
+            cargo,
+            position_enc,
+            miners_status,
+            energy,
+            account_balance,
+            local_objects_count
+        ])
+
+        return observation.astype(np.float32)
 
     def _buy_fuel(self):
         """Allows the ship to purchase fuel (energy) at the current station."""
@@ -214,27 +265,6 @@ class SingleSystemSoloAgentEnv(gym.Env):
             print("Cannot buy fuel outside of a station.")
             reward -= 10  # Penalty for invalid location
         return reward
-
-    def _get_obs(self):
-        # Map mineral names to indices
-        mineral_indices = {mineral: idx for idx, mineral in enumerate(MINERALS.keys())}
-        cargo_array = np.array([self.ship_state['cargo'][idx] for idx in mineral_indices.values()], dtype=np.int32)
-
-        observation = {
-            'system_state': {
-                'locations': self.system_state['locations'],
-            },
-            'local_state': {
-                'objects': self.local_state['objects'],
-            },
-            'ship_state': {
-                'cargo': cargo_array,
-                'position': self.ship_state['position'],
-                'miners': self.ship_state['miners'],
-                'energy': self.ship_state['energy'],  # Include energy in observations
-            },
-        }
-        return observation
 
     def render(self):
         print("Current Position:", self.ship_state['position'])
@@ -272,6 +302,8 @@ class SingleSystemSoloAgentEnv(gym.Env):
                 print(f"Mined {asteroid['quantity']} units of {asteroid['mineral']}")
                 self.local_state['objects'].pop(target_id)
                 self.belt_resources[self.ship_state['position']] = self.local_state['objects']
+                # Reset miner status back to inactive
+                self.ship_state['miners'][miner_id] = 0  # Reset miner status here
                 # Provide a reward proportional to the mineral value
                 mineral_value = MINERALS[asteroid['mineral']] * asteroid['quantity']
                 reward += mineral_value * 0.1  # Adjust the scaling factor as needed
@@ -304,6 +336,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
         if np.any(self.ship_state['cargo'] > 0):
             self.ship_state['cargo'] = np.zeros(len(MINERALS), dtype=np.int32)
             print("Emptied cargo hold.")
+            reward -= 1  # Small penalty for discarding cargo
         else:
             print("Cargo hold is already empty.")
             reward -= 2  # Penalty for unnecessary action
@@ -407,6 +440,11 @@ class SingleSystemSoloAgentEnv(gym.Env):
 
             if is_valid:
                 valid_action_indices.append(idx)
+
+        # Add 'Wait' action as always valid
+        wait_action_idx = next((idx for idx, action in enumerate(ACTIONS) if action['action_type'] == 7), None)
+        if wait_action_idx is not None:
+            valid_action_indices.append(wait_action_idx)
 
         return valid_action_indices
 

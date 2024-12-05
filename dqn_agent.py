@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from collections import deque
 
-from dqn_env import SingleSystemSoloAgentEnv, ASTEROID_BELTS, STATIONS, MINERALS, draw_environment
+from dqn_env import SingleSystemSoloAgentEnv, MAX_ENERGY, ACTIONS, draw_environment
 
 # Colors
 BLACK = (0, 0, 0)
@@ -30,7 +30,7 @@ LR = 1e-4
 TARGET_UPDATE = 10
 EPS_START = 1.0
 EPS_END = 0.1
-EPS_DECAY = 1000  # Decay rate for epsilon
+EPS_DECAY = 10000  # Increased decay rate for smoother epsilon decay
 
 # Define the neural network
 class DQN(nn.Module):
@@ -60,18 +60,31 @@ class DQNAgent:
         self.eps_end = EPS_END
         self.eps_decay = EPS_DECAY
 
-    def select_action(self, state):
-        # Epsilon-greedy action selection
+    def select_action(self, state, valid_actions):
+        if not valid_actions:
+            print("Warning: No valid actions available. Choosing default action.")
+            # Choose a default action, e.g., 'Wait'
+            wait_action_idx = next((idx for idx, action in enumerate(ACTIONS) if action['action_type'] == 7), None)
+            if wait_action_idx is not None:
+                return wait_action_idx
+            else:
+                # If 'Wait' is not defined, return a random action
+                return random.randint(0, self.action_size - 1)
+        # Epsilon-greedy action selection with action masking
         eps_threshold = self.eps_end + (self.eps_start - self.eps_end) * \
             np.exp(-1. * self.steps_done / self.eps_decay)
         self.steps_done += 1
         if random.random() < eps_threshold:
-            return random.randrange(self.action_size)
+            # Randomly select a valid action
+            return random.choice(valid_actions)
         else:
             with torch.no_grad():
-                state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-                q_values = self.policy_net(state)
-                return q_values.max(1)[1].item()
+                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                q_values = self.policy_net(state_tensor).cpu().numpy().squeeze()
+                # Mask invalid actions
+                masked_q_values = np.full_like(q_values, -np.inf)
+                masked_q_values[valid_actions] = q_values[valid_actions]
+                return np.argmax(masked_q_values)
 
     def remember(self, state, action, next_state, reward, done):
         self.memory.append((state, action, next_state, reward, done))
@@ -86,15 +99,16 @@ class DQNAgent:
         reward_batch = torch.FloatTensor([s[3] for s in batch]).unsqueeze(1).to(self.device)
         done_batch = torch.FloatTensor([s[4] for s in batch]).unsqueeze(1).to(self.device)
 
-        # Compute Q(s_t, a) - the model computes Q(s_t), then we select the columns of actions taken
+        # Compute Q(s_t, a)
         state_action_values = self.policy_net(state_batch).gather(1, action_batch)
 
-        # Compute V(s_{t+1}) for all next states.
+        # Compute V(s_{t+1})
         next_state_values = self.target_net(next_state_batch).max(1)[0].detach().unsqueeze(1)
-        # Compute the expected Q values
+
+        # Compute expected Q values
         expected_state_action_values = reward_batch + (1 - done_batch) * GAMMA * next_state_values
 
-        # Compute Huber loss
+        # Compute loss
         loss = nn.functional.smooth_l1_loss(state_action_values, expected_state_action_values)
 
         # Optimize the model
@@ -104,68 +118,18 @@ class DQNAgent:
 
 # Preprocessing functions
 def preprocess_state(observation):
-    # Flatten observation into a feature vector
-    ship_state = observation['ship_state']
-    cargo = ship_state['cargo']
-    position = ship_state['position']
-    energy = ship_state.get('energy', 100)
-    account_balance = ship_state.get('account_balance', 0)
-    miners = ship_state['miners']
-    local_objects = observation['local_state']['objects']
-
-    # Encode position as one-hot vector
-    positions = ASTEROID_BELTS + STATIONS
-    position_enc = np.zeros(len(positions))
-    position_idx = positions.index(position)
-    position_enc[position_idx] = 1
-
-    # Encode miners
-    miners_enc = miners
-
-    # Encode local objects (simplified, count of objects)
-    local_objects_count = len(local_objects)
-
-    # Concatenate all features into a state vector
-    state = np.concatenate([
-        cargo,
-        [energy],
-        [account_balance],
-        miners_enc,
-        position_enc,
-        [local_objects_count]
-    ])
-    return state
+    # Normalize energy level and account balance if necessary
+    observation = np.array(observation, dtype=np.float32)
+    observation[-3] /= 1.0  # Energy level is already normalized between 0 and 1
+    observation[-2] /= 10000.0  # Adjust based on expected scale
+    return observation
 
 def action_from_index(action_idx):
-    # Extend the action space to include mining up to first 3 asteroids
-    actions = [
-        {'action_type': 0, 'target': 0, 'miner_id': None},  # Warp to Belt1
-        {'action_type': 0, 'target': 1, 'miner_id': None},  # Warp to Belt2
-        {'action_type': 0, 'target': 2, 'miner_id': None},  # Warp to Belt3
-        # Mining actions for first three asteroids
-        {'action_type': 1, 'target': 0, 'miner_id': 0},     # Mine asteroid 0
-        {'action_type': 1, 'target': 1, 'miner_id': 0},     # Mine asteroid 1
-        {'action_type': 1, 'target': 2, 'miner_id': 0},     # Mine asteroid 2
-        {'action_type': 5, 'target': None, 'miner_id': None},  # Sell minerals
-        {'action_type': 6, 'target': None, 'miner_id': None},  # Buy fuel
-        {'action_type': 0, 'target': 3, 'miner_id': None},  # Warp to Station1
-        {'action_type': 0, 'target': 4, 'miner_id': None},  # Warp to Station2
-    ]
-    return actions[action_idx]
+    return ACTIONS[action_idx]
 
 def index_from_action(action):
-    # Map action dict to index
-    actions = [
-        {'action_type': 0, 'target': 0, 'miner_id': None},  # Warp to Belt1
-        {'action_type': 0, 'target': 1, 'miner_id': None},  # Warp to Belt2
-        {'action_type': 0, 'target': 2, 'miner_id': None},  # Warp to Belt3
-        {'action_type': 1, 'target': 0, 'miner_id': 0},     # Mine asteroid
-        {'action_type': 5, 'target': None, 'miner_id': None},  # Sell minerals
-        {'action_type': 6, 'target': None, 'miner_id': None},  # Buy fuel
-        {'action_type': 0, 'target': 3, 'miner_id': None},  # Warp to Station1
-        {'action_type': 0, 'target': 4, 'miner_id': None},  # Warp to Station2
-    ]
-    return actions.index(action)
+    # Use the ACTIONS list from the environment
+    return ACTIONS.index(action)
 
 def run_dqn_agent(env, num_episodes=500, render=True):
     """Train and evaluate the DQN agent in the environment."""
@@ -180,7 +144,7 @@ def run_dqn_agent(env, num_episodes=500, render=True):
 
     # Get state and action sizes
     observation_space_size = preprocess_state(env.reset()[0]).shape[0]
-    action_space_size = 10  # Updated from 8 to 10
+    action_space_size = len(ACTIONS)
 
     agent = DQNAgent(state_size=observation_space_size, action_size=action_space_size)
 
@@ -205,13 +169,16 @@ def run_dqn_agent(env, num_episodes=500, render=True):
                         pygame.quit()
                         sys.exit()
 
+            # Get valid actions from the environment
+            valid_actions = env.get_valid_actions()
+
             # Select and perform an action
-            action_idx = agent.select_action(state)
+            action_idx = agent.select_action(state, valid_actions)
             action = action_from_index(action_idx)
             current_action = action
 
             # Take the action in the environment
-            observation_next, reward, done, truncated, info = env.step(action)
+            observation_next, reward, done, truncated, info = env.step(action_idx)
             state_next = preprocess_state(observation_next)
 
             # Remember the transition
@@ -231,8 +198,7 @@ def run_dqn_agent(env, num_episodes=500, render=True):
             step_number += 1
 
             # Record the current account balance
-            ship_state = observation_next['ship_state']
-            account_balance = ship_state.get('account_balance', 0)
+            account_balance = env.ship_state['account_balance']
             account_balances.append(account_balance)
 
             # Draw the environment only if rendering is enabled
@@ -284,17 +250,23 @@ def evaluate_dqn_agent(env, agent, num_episodes=10):
                     pygame.quit()
                     sys.exit()
 
+            # Get valid actions from the environment
+            valid_actions = env.get_valid_actions()
+
             # Select action (without exploration)
             with torch.no_grad():
                 state_tensor = torch.FloatTensor(state).unsqueeze(0).to(agent.device)
-                q_values = agent.policy_net(state_tensor)
-                action_idx = q_values.max(1)[1].item()
+                q_values = agent.policy_net(state_tensor).cpu().numpy().squeeze()
+                # Mask invalid actions
+                masked_q_values = np.full_like(q_values, -np.inf)
+                masked_q_values[valid_actions] = q_values[valid_actions]
+                action_idx = np.argmax(masked_q_values)
 
             action = action_from_index(action_idx)
             current_action = action
 
             # Take the action in the environment
-            observation_next, reward, done, truncated, info = env.step(action)
+            observation_next, reward, done, truncated, info = env.step(action_idx)
             state_next = preprocess_state(observation_next)
 
             # Move to the next state
@@ -304,8 +276,7 @@ def evaluate_dqn_agent(env, agent, num_episodes=10):
             step_number += 1
 
             # Record the current account balance
-            ship_state = observation_next['ship_state']
-            account_balance = ship_state.get('account_balance', 0)
+            account_balance = env.ship_state['account_balance']
             account_balances.append(account_balance)
 
             # Draw the environment
@@ -354,7 +325,7 @@ if __name__ == "__main__":
 
     # Load the trained model for evaluation
     observation_space_size = preprocess_state(env.reset()[0]).shape[0]
-    action_space_size = 10  # Updated from 8 to 10
+    action_space_size = len(ACTIONS)
 
     trained_agent = DQNAgent(state_size=observation_space_size, action_size=action_space_size)
     trained_agent.policy_net.load_state_dict(torch.load("dqn_agent.pth"))
