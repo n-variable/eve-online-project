@@ -35,13 +35,15 @@ STATION_FUEL_PRICES = {
 }
 
 # Energy constants
-MAX_ENERGY = 100
+MAX_ENERGY = 300
 ENERGY_REGEN_RATE = 5  # Energy regenerated per step
 ENERGY_COSTS = {
     'warp': 15,
     'mine': 10,
     'move': 5,
 }
+
+MAX_STEPS_PER_EPISODE = 200
 
 class SingleSystemSoloAgentEnv(gym.Env):
     def __init__(self):
@@ -66,6 +68,8 @@ class SingleSystemSoloAgentEnv(gym.Env):
                 'cargo': spaces.Box(low=0, high=1000, shape=(len(MINERALS),), dtype=np.int32),
                 'position': spaces.Discrete(10),  # Simplified position
                 'miners': spaces.MultiBinary(2),  # Status of miners (0: idle, 1: active)
+                'energy': spaces.Box(low=0, high=MAX_ENERGY, shape=(1,), dtype=np.int32),  # Energy level
+                'account_balance': spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.int32),
             }),
         })
 
@@ -74,9 +78,11 @@ class SingleSystemSoloAgentEnv(gym.Env):
 
         # Initialize state
         self.reset()
+        self.step_count = 0  # Initialize step counter
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self.step_count = 0  # Reset step counter
 
         # Initialize system state
         self.system_state = {
@@ -102,6 +108,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
         return observation, info
 
     def step(self, action):
+        self.step_count += 1  # Increment step counter
         done = False
         reward = 0
         info = {}
@@ -110,21 +117,15 @@ class SingleSystemSoloAgentEnv(gym.Env):
         target = action.get('target', None)
         miner_id = action.get('miner_id', None)
 
-        # Regenerate energy at the beginning of the step
-        self.ship_state['energy'] = min(
-            self.ship_state['energy'] + ENERGY_REGEN_RATE,
-            MAX_ENERGY
-        )
-
         # Energy cost mapping
         action_energy_costs = {
             0: ENERGY_COSTS['warp'],   # Warp
             1: ENERGY_COSTS['mine'],   # Mine
             2: ENERGY_COSTS['move'],   # Move
-            3: 0,                      # Dock (no energy cost)
-            4: 0,                      # Empty Cargo (no energy cost)
-            5: 0,                      # Sell Minerals (no energy cost)
-            6: 0,                      # Buy Fuel (no energy cost)
+            3: 0,                       # Dock (no energy cost)
+            4: 0,                       # Empty Cargo (no energy cost)
+            5: 0,                       # Sell Minerals (no energy cost)
+            6: 0,                       # Buy Fuel (no energy cost)
         }
 
         energy_cost = action_energy_costs.get(action_type, 0)
@@ -138,7 +139,8 @@ class SingleSystemSoloAgentEnv(gym.Env):
             if action_type == 0:  # Warp
                 self._warp(target)
             elif action_type == 1:  # Mine
-                self._mine(miner_id, target)
+                mine_reward = self._mine(miner_id, target)
+                reward += mine_reward  # Add mining reward
             elif action_type == 2:  # Move
                 self._move(target)
             elif action_type == 3:  # Dock
@@ -148,16 +150,57 @@ class SingleSystemSoloAgentEnv(gym.Env):
             elif action_type == 5:  # Sell Minerals
                 reward += self._sell_minerals()
             elif action_type == 6:  # Buy Fuel
-                self._buy_fuel()
+                fuel_cost = self._buy_fuel()
+                if fuel_cost > 0:
+                    reward -= fuel_cost * 0.1  # Apply a penalty (adjust the scaling factor as needed)
         else:
             print("Not enough energy to perform this action.")
+            # Optional: Apply a penalty for attempting an invalid action
+            reward -= 10
+
+        # Regenerate energy
+        self.ship_state['energy'] = min(self.ship_state['energy'] + ENERGY_REGEN_RATE, MAX_ENERGY)
 
         # Regenerate resources occasionally
         if random.random() < 0.1:  # 10% chance to regenerate in this step
             self._regenerate_belt_resources()
 
         observation = self._get_obs()
+
+        # Check for episode termination
+        if self.step_count >= MAX_STEPS_PER_EPISODE:
+            done = True
+
         return observation, reward, done, False, info
+
+    def _buy_fuel(self):
+        """Allows the ship to purchase fuel (energy) at the current station."""
+        current_station = self.ship_state['position']
+        fuel_cost = 0
+        if current_station in STATIONS:
+            # Get fuel price at the current station
+            fuel_price = STATION_FUEL_PRICES.get(current_station, None)
+            if fuel_price is not None:
+                # Calculate the amount of energy needed to reach MAX_ENERGY
+                energy_needed = MAX_ENERGY - self.ship_state['energy']
+                if energy_needed > 0:
+                    total_cost = energy_needed * fuel_price
+                    if self.ship_state['account_balance'] >= total_cost:
+                        # Deduct the cost and refill energy
+                        self.ship_state['account_balance'] -= total_cost
+                        self.ship_state['energy'] = MAX_ENERGY
+                        print(f"Bought {energy_needed} units of fuel for {total_cost} ISK at {current_station}")
+                        print(f"Updated Account Balance: {self.ship_state['account_balance']} ISK")
+                        fuel_cost = total_cost
+                    else:
+                        print("Not enough ISK to buy fuel.")
+                else:
+                    print("Energy is already full.")
+            else:
+                print("No fuel available at this station.")
+        else:
+            print("Cannot buy fuel outside of a station.")
+        return fuel_cost
 
     def _get_obs(self):
         # Map mineral names to indices
@@ -211,8 +254,12 @@ class SingleSystemSoloAgentEnv(gym.Env):
                 print(f"Mined {asteroid['quantity']} units of {asteroid['mineral']}")
                 self.local_state['objects'].pop(target_id)
                 self.belt_resources[self.ship_state['position']] = self.local_state['objects']
+                # Provide a reward proportional to the mineral value
+                mineral_value = MINERALS[asteroid['mineral']] * asteroid['quantity']
+                return mineral_value * 0.1  # Adjust the scaling factor as needed
         else:
             print("Miner is already active")
+        return 0
 
     def _move(self, target):
         print(f"Moving towards {target}")
@@ -274,32 +321,6 @@ class SingleSystemSoloAgentEnv(gym.Env):
 
     def close(self):
         pass
-
-    def _buy_fuel(self):
-        """Allows the ship to purchase fuel (energy) at the current station."""
-        current_station = self.ship_state['position']
-        if current_station in STATIONS:
-            # Get fuel price at the current station
-            fuel_price = STATION_FUEL_PRICES.get(current_station, None)
-            if fuel_price is not None:
-                # Calculate the amount of energy needed to reach MAX_ENERGY
-                energy_needed = MAX_ENERGY - self.ship_state['energy']
-                if energy_needed > 0:
-                    total_cost = energy_needed * fuel_price
-                    if self.ship_state['account_balance'] >= total_cost:
-                        # Deduct the cost and refill energy
-                        self.ship_state['account_balance'] -= total_cost
-                        self.ship_state['energy'] = MAX_ENERGY
-                        print(f"Bought {energy_needed} units of fuel for {total_cost} ISK at {current_station}")
-                        print(f"Updated Account Balance: {self.ship_state['account_balance']} ISK")
-                    else:
-                        print("Not enough ISK to buy fuel.")
-                else:
-                    print("Energy is already full.")
-            else:
-                print("No fuel available at this station.")
-        else:
-            print("Cannot buy fuel outside of a station.")
 
 import pygame
 import sys
@@ -503,7 +524,7 @@ def run_environment(env):
         step_number += 1
 
         # Control the frame rate
-        clock.tick(2)  # 2 frames per second
+        clock.tick(1)  # 2 frames per second
 
     pygame.quit()
     sys.exit()
