@@ -356,7 +356,6 @@ if __name__ == "__main__":
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
     plt.title('DQN Agent Training Performance')
-    plt.ylim(bottom=0)
     plt.show()
 
     # Plot the account balance over time during evaluation
@@ -377,5 +376,4 @@ if __name__ == "__main__":
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
     plt.title('DQN Agent Evaluation Performance')
-    plt.ylim(bottom=0)
     plt.show()

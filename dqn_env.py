@@ -188,7 +188,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
         self.ship_state['energy'] = min(self.ship_state['energy'] + ENERGY_REGEN_RATE, MAX_ENERGY)
 
         # Regenerate resources occasionally
-        if self.step_count % (MAX_STEPS_PER_EPISODE/2) == 0:  # 10% chance to regenerate in this step
+        if random.random() < 0.03:  # 10% chance to regenerate in this step
             self._regenerate_belt_resources()
 
         observation = self._get_obs()
