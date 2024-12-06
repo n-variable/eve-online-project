@@ -321,7 +321,7 @@ if __name__ == "__main__":
     env = SingleSystemSoloAgentEnv()
 
     # Train the agent
-    episode_rewards, account_balances_per_episode = run_dqn_agent(env, num_episodes=50)
+    episode_rewards, account_balances_per_episode = run_dqn_agent(env, num_episodes=100)
 
     # Load the trained model for evaluation
     observation_space_size = preprocess_state(env.reset()[0]).shape[0]
@@ -340,12 +340,14 @@ if __name__ == "__main__":
     # Plot the account balance over time during training
     plt.figure(figsize=(10, 6))
     # To avoid overcrowding the plot, plot only the first 10 episodes
-    for idx, balances in enumerate(account_balances_per_episode[:10]):
-        plt.plot(balances, label=f'Episode {idx+1}')
+    for idx, balances in enumerate(account_balances_per_episode[:]):
+        plt.plot(balances, color=(0, idx/len(account_balances_per_episode), 0), label=f'Episode {idx+1}')
     plt.xlabel('Time Steps')
     plt.ylabel('Account Balance')
-    plt.title('Profit Over Time During Training (First 10 Episodes)')
-    plt.legend()
+    plt.title('Profit Over Time During Training')
+
+    handles, labels = plt.gca().get_legend_handles_labels()
+    plt.legend([handles[0]] + handles[24::25], [labels[0]] + labels[24::25], loc="upper left")
     plt.show()
 
     # Plot the episode rewards during training
@@ -354,16 +356,19 @@ if __name__ == "__main__":
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
     plt.title('DQN Agent Training Performance')
+    plt.ylim(bottom=0)
     plt.show()
 
     # Plot the account balance over time during evaluation
     plt.figure(figsize=(10, 6))
     for idx, balances in enumerate(evaluation_account_balances_per_episode):
-        plt.plot(balances, label=f'Evaluation Episode {idx+1}')
+        plt.plot(balances, color=(0, idx/len(evaluation_account_balances_per_episode), 0), label=f'Evaluation Episode {idx+1}')
     plt.xlabel('Time Steps')
     plt.ylabel('Account Balance')
     plt.title('Profit Over Time During Evaluation')
-    plt.legend()
+
+    handles, labels = plt.gca().get_legend_handles_labels()
+    plt.legend([handles[0]] + handles[24::25], [labels[0]] + labels[24::25], loc="upper left")
     plt.show()
 
     # Plot the episode rewards during evaluation
@@ -372,4 +377,5 @@ if __name__ == "__main__":
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
     plt.title('DQN Agent Evaluation Performance')
+    plt.ylim(bottom=0)
     plt.show()

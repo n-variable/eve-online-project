@@ -2,9 +2,12 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import random
-import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 
-# Define constants
+# Retain existing constants from the original environment
 MINERALS = {
     'Veldspar': 10,
     'Scordite': 20,
@@ -14,7 +17,6 @@ MINERALS = {
 ASTEROID_BELTS = ['Belt1', 'Belt2', 'Belt3']
 STATIONS = ['Station1', 'Station2']
 
-# Add this dictionary
 STATION_MINERAL_PRICES = {
     'Station1': {
         'Veldspar': 12,
@@ -28,15 +30,13 @@ STATION_MINERAL_PRICES = {
     },
 }
 
-# Add this dictionary for fuel prices
 STATION_FUEL_PRICES = {
-    'Station1': 5,  # ISK per unit of energy
+    'Station1': 5,
     'Station2': 6,
 }
 
-# Energy constants
 MAX_ENERGY = 300
-ENERGY_REGEN_RATE = 2  # Energy regenerated per step
+ENERGY_REGEN_RATE = 2
 ENERGY_COSTS = {
     'warp': 15,
     'mine': 10,
@@ -45,7 +45,6 @@ ENERGY_COSTS = {
 
 MAX_STEPS_PER_EPISODE = 150
 
-# Define the list of possible actions
 ACTIONS = [
     {'action_type': 0, 'target': 0, 'miner_id': None},  # Warp to Belt1
     {'action_type': 0, 'target': 1, 'miner_id': None},  # Warp to Belt2
@@ -62,69 +61,70 @@ ACTIONS = [
     # Add more actions as needed
 ]
 
+class ActorCriticNetwork(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(ActorCriticNetwork, self).__init__()
+        
+        # Shared layers
+        self.shared_network = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU()
+        )
+        
+        # Actor head (policy)
+        self.actor_head = nn.Linear(64, output_dim)
+        
+        # Critic head (value)
+        self.critic_head = nn.Linear(64, 1)
+    
+    def forward(self, state):
+        x = self.shared_network(state)
+        
+        # Compute policy probabilities and state value
+        action_probs = F.softmax(self.actor_head(x), dim=-1)
+        state_value = self.critic_head(x)
+        
+        return action_probs, state_value
+
 class SingleSystemSoloAgentEnv(gym.Env):
-    def __init__(self):
-        super(SingleSystemSoloAgentEnv, self).__init__()
-
-        # Update the action space to be discrete
+    def __init__(self, learning_rate=1e-3):
+        super().__init__()
+        
+        # Environment configuration (similar to original)
         self.action_space = spaces.Discrete(len(ACTIONS))
-
-        # Observation space dimensions
+        
+        # Observation dimensions
         num_minerals = len(MINERALS)
         num_positions = len(ASTEROID_BELTS + STATIONS)
         num_miners = len(np.zeros(2, dtype=np.int8))
-        observation_size = num_minerals + num_positions + num_miners + 1 + 1 + 1  # cargo + position + miners + energy + account_balance + local_objects_count
-
+        observation_size = num_minerals + num_positions + num_miners + 1 + 1 + 1
+        
         self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(observation_size,),
-            dtype=np.float32
+            low=-np.inf, high=np.inf,
+            shape=(observation_size,), dtype=np.float32
         )
-
-        # System-wide state: Map each belt to its resources
-        self.belt_resources = {belt: self.generate_asteroids() for belt in ASTEROID_BELTS}
-
-        # Initialize state
+        
+        # Actor-Critic Network
+        self.actor_critic = ActorCriticNetwork(input_dim=observation_size, output_dim=len(ACTIONS))
+        
+        # Optimizer
+        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
+        
+        # Initialize environment state
         self.reset()
-        self.step_count = 0  # Initialize step counter
-
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
-        self.step_count = 0  # Reset step counter
-
-        # Regenerate asteroid belts
-        self.belt_resources = {belt: self.generate_asteroids() for belt in ASTEROID_BELTS}
-
-        # Initialize system state
-        self.system_state = {
-            'locations': ASTEROID_BELTS + STATIONS
-        }
-
-        # Initialize local state
-        self.local_state = {
-            'objects': [],
-        }
-
-        # Initialize ship state
-        self.ship_state = {
-            'cargo': np.zeros(len(MINERALS), dtype=np.int32),
-            'position': 'Station1',
-            'miners': np.zeros(2, dtype=np.int8),
-            'account_balance': 0,
-            'energy': MAX_ENERGY,
-        }
-
-        observation = self._get_obs()
-        info = {}
-        return observation, info
-
-    def step(self, action_idx):
-        self.step_count += 1  # Increment step counter
-        done = False
-        reward = 0
-        info = {}
-
+    
+    def step(self, action):
+        # Convert action to tensor for network processing
+        state = torch.FloatTensor(self._get_obs())
+        
+        # Forward pass through actor-critic network
+        action_probs, state_value = self.actor_critic(state)
+        
+        # Sample an action based on probabilities
+        action_idx = torch.multinomial(action_probs, 1).item()
+        
         # Get the action dictionary from the action index
         action = ACTIONS[action_idx]
 
@@ -140,7 +140,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
             3: 0,                      # Dock (no energy cost)
             4: 0,                      # Empty Cargo (no energy cost)
             5: 0,                      # Sell Minerals (no energy cost)
-            6: 0,                      # Buy Fuel (no energy cost),
+            6: 0,                      # Buy Fuel (no energy cost)
         }
 
         energy_cost = action_energy_costs.get(action_type, 0)
@@ -151,77 +151,79 @@ class SingleSystemSoloAgentEnv(gym.Env):
             self.ship_state['energy'] -= energy_cost
 
             # Perform the action and collect rewards or penalties
+            reward = 0
             if action_type == 0:  # Warp
-                warp_reward = self._warp(target)
-                reward += warp_reward
+                reward += self._warp(target)
             elif action_type == 1:  # Mine
-                mine_reward = self._mine(miner_id, target)
-                reward += mine_reward
+                reward += self._mine(miner_id, target)
             elif action_type == 2:  # Move
-                move_reward = self._move(target)
-                reward += move_reward
+                reward += self._move(target)
             elif action_type == 3:  # Dock
-                dock_reward = self._dock(target)
-                reward += dock_reward
+                reward += self._dock(target)
             elif action_type == 4:  # Empty Cargo
-                empty_cargo_reward = self._empty_cargo()
-                reward += empty_cargo_reward
+                reward += self._empty_cargo()
             elif action_type == 5:  # Sell Minerals
-                sell_reward = self._sell_minerals()
-                reward += sell_reward
+                reward += self._sell_minerals()
             elif action_type == 6:  # Buy Fuel
-                buy_fuel_reward = self._buy_fuel()
-                reward += buy_fuel_reward
+                reward += self._buy_fuel()
             elif action_type == 7:  # Wait
-                # print("Waiting to regenerate energy.")
-                # Regenerate more energy when waiting
                 self.ship_state['energy'] = min(self.ship_state['energy'] + ENERGY_REGEN_RATE * 2, MAX_ENERGY)
                 reward -= 0.5  # Small penalty for waiting
             else:
-                print("Unknown action type.")
-                reward -= 5  # Penalty for invalid action type
+                reward -= 5  # Penalty for unknown action type
         else:
-            print("Not enough energy to perform this action.")
             reward -= 20  # Penalty for insufficient energy
 
-        # Regenerate energy
+        # Regenerate energy and resources
         self.ship_state['energy'] = min(self.ship_state['energy'] + ENERGY_REGEN_RATE, MAX_ENERGY)
-
-        # Regenerate resources occasionally
-        if self.step_count % (MAX_STEPS_PER_EPISODE/2) == 0:  # 10% chance to regenerate in this step
+        if random.random() < 0.1:  # 10% chance to regenerate resources
             self._regenerate_belt_resources()
 
-        observation = self._get_obs()
+        # Get next state (observation)
+        next_observation = self._get_obs()
 
         # Check for episode termination
+        done = False
         if self.step_count >= MAX_STEPS_PER_EPISODE:
             done = True
 
-        return observation, reward, done, False, info
+        # Compute TD error (Advantage) for the actor-critic update
+        next_state = torch.FloatTensor(next_observation)
+        with torch.no_grad():
+            _, next_state_value = self.actor_critic(next_state)
+        
+        td_target = reward + (1 - done) * next_state_value
+        td_error = td_target - state_value
+        
+        # Actor-Critic Loss
+        actor_loss = -torch.log(action_probs[action_idx]) * td_error.detach()
+        critic_loss = F.mse_loss(state_value, td_target)
+        
+        # Combined loss
+        loss = actor_loss + critic_loss
+        
+        # Gradient update
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
+        return next_observation, reward, done, False, {}
+
+    
     def _get_obs(self):
-        # Encode cargo
+        # Same implementation as original environment
         cargo = self.ship_state['cargo']
-
-        # Encode position as one-hot vector
+        
         positions = ASTEROID_BELTS + STATIONS
         position_enc = np.zeros(len(positions))
         position_idx = positions.index(self.ship_state['position'])
         position_enc[position_idx] = 1
-
-        # Encode miners' status
+        
         miners_status = self.ship_state['miners']
-
-        # Encode energy level (normalize between 0 and 1)
         energy = np.array([self.ship_state['energy'] / MAX_ENERGY])
-
-        # Encode account balance (you can normalize or cap if necessary)
         account_balance = np.array([self.ship_state['account_balance']])
-
-        # Encode local objects (e.g., count of asteroids)
         local_objects_count = np.array([len(self.local_state['objects'])])
-
-        # Concatenate all features into a single flat array
+        
         observation = np.concatenate([
             cargo,
             position_enc,
@@ -230,7 +232,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
             account_balance,
             local_objects_count
         ])
-
+        
         return observation.astype(np.float32)
 
     def _buy_fuel(self):
@@ -334,19 +336,9 @@ class SingleSystemSoloAgentEnv(gym.Env):
     def _empty_cargo(self):
         reward = 0
         if np.any(self.ship_state['cargo'] > 0):
-            
-            total = 0
-            prices = STATION_MINERAL_PRICES.get('Station1', MINERALS)
-            for idx, quantity in enumerate(self.ship_state['cargo']):
-                if quantity > 0:
-                    mineral = list(MINERALS.keys())[idx]
-                    price = prices.get(mineral, MINERALS[mineral])
-                    total += quantity * price
-                    
-            reward -= 20  # Small penalty for discarding cargo
-            
             self.ship_state['cargo'] = np.zeros(len(MINERALS), dtype=np.int32)
-            print("Emptied cargo hold.", 'Penalty: ', reward)
+            print("Emptied cargo hold.")
+            reward -= 1  # Small penalty for discarding cargo
         else:
             print("Cargo hold is already empty.")
             reward -= 2  # Penalty for unnecessary action
@@ -393,6 +385,9 @@ class SingleSystemSoloAgentEnv(gym.Env):
                 self.belt_resources[belt] = self.generate_asteroids()
                 print(f"Resources regenerated in {belt}")
 
+
+    # Retain other methods from the original environment
+    # (generate_asteroids, _mine, _warp, etc.)
     def generate_asteroids(self):
         asteroids = []
         for _ in range(random.randint(5, 10)):
@@ -400,7 +395,6 @@ class SingleSystemSoloAgentEnv(gym.Env):
             quantity = random.randint(50, 200)
             asteroids.append({'mineral': mineral, 'quantity': quantity})
         return asteroids
-
     def close(self):
         pass
 
