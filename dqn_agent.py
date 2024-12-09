@@ -28,8 +28,8 @@ BATCH_SIZE = 64
 GAMMA = 0.99
 LR = 1e-4
 TARGET_UPDATE = 10
-EPS_START = 0.9
-EPS_END = 0.05
+EPS_START = 1.0
+EPS_END = 0.1
 EPS_DECAY = 5000
 
 # Define the neural network
