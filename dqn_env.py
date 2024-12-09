@@ -36,16 +36,19 @@ STATION_FUEL_PRICES = {
 
 # Energy constants
 MAX_ENERGY = 300
-ENERGY_REGEN_RATE = 2  # Energy regenerated per step
+ENERGY_REGEN_RATE = 1  # Energy regenerated per step
 ENERGY_COSTS = {
-    'warp': 15,
-    'mine': 10,
+    'warp': 20,
+    'mine': 15,
     'move': 5,
 }
 
-MAX_STEPS_PER_EPISODE = 150
+MAX_STEPS_PER_EPISODE = 100
 
-# Define the list of possible actions
+# Cargo capacity
+MAX_CARGO_CAPACITY = 500  # Maximum total quantity of minerals that can be carried
+
+# Define the list of possible actions (Removed 'Empty Cargo' action)
 ACTIONS = [
     {'action_type': 0, 'target': 0, 'miner_id': None},  # Warp to Belt1
     {'action_type': 0, 'target': 1, 'miner_id': None},  # Warp to Belt2
@@ -57,7 +60,6 @@ ACTIONS = [
     {'action_type': 1, 'target': 2, 'miner_id': 0},     # Mine asteroid 2
     {'action_type': 5, 'target': None, 'miner_id': None},  # Sell minerals
     {'action_type': 6, 'target': None, 'miner_id': None},  # Buy Fuel
-    {'action_type': 4, 'target': None, 'miner_id': None},  # Empty Cargo
     {'action_type': 7, 'target': None, 'miner_id': None},  # Wait
     # Add more actions as needed
 ]
@@ -72,7 +74,7 @@ class SingleSystemSoloAgentEnv(gym.Env):
         # Observation space dimensions
         num_minerals = len(MINERALS)
         num_positions = len(ASTEROID_BELTS + STATIONS)
-        num_miners = len(np.zeros(2, dtype=np.int8))
+        num_miners = 2  # Number of miners
         observation_size = num_minerals + num_positions + num_miners + 1 + 1 + 1  # cargo + position + miners + energy + account_balance + local_objects_count
 
         self.observation_space = spaces.Box(
@@ -132,15 +134,15 @@ class SingleSystemSoloAgentEnv(gym.Env):
         target = action.get('target', None)
         miner_id = action.get('miner_id', None)
 
-        # Energy cost mapping
+        # Energy cost mapping (Removed 'Empty Cargo' action)
         action_energy_costs = {
             0: ENERGY_COSTS['warp'],   # Warp
             1: ENERGY_COSTS['mine'],   # Mine
             2: ENERGY_COSTS['move'],   # Move
             3: 0,                      # Dock (no energy cost)
-            4: 0,                      # Empty Cargo (no energy cost)
             5: 0,                      # Sell Minerals (no energy cost)
             6: 0,                      # Buy Fuel (no energy cost),
+            7: 0,                      # Wait
         }
 
         energy_cost = action_energy_costs.get(action_type, 0)
@@ -163,9 +165,6 @@ class SingleSystemSoloAgentEnv(gym.Env):
             elif action_type == 3:  # Dock
                 dock_reward = self._dock(target)
                 reward += dock_reward
-            elif action_type == 4:  # Empty Cargo
-                empty_cargo_reward = self._empty_cargo()
-                reward += empty_cargo_reward
             elif action_type == 5:  # Sell Minerals
                 sell_reward = self._sell_minerals()
                 reward += sell_reward
@@ -175,8 +174,8 @@ class SingleSystemSoloAgentEnv(gym.Env):
             elif action_type == 7:  # Wait
                 print("Waiting to regenerate energy.")
                 # Regenerate more energy when waiting
-                self.ship_state['energy'] = min(self.ship_state['energy'] + ENERGY_REGEN_RATE * 2, MAX_ENERGY)
-                reward -= 0.5  # Small penalty for waiting
+                self.ship_state['energy'] = min(self.ship_state['energy'] + ENERGY_REGEN_RATE, MAX_ENERGY)
+                reward -= 1  # Small penalty for waiting
             else:
                 print("Unknown action type.")
                 reward -= 5  # Penalty for invalid action type
@@ -296,16 +295,31 @@ class SingleSystemSoloAgentEnv(gym.Env):
         if self.ship_state['miners'][miner_id] == 0:
             if target_id < len(self.local_state['objects']):
                 asteroid = self.local_state['objects'][target_id]
+                # Check if cargo capacity allows for mining the asteroid
+                current_cargo_total = np.sum(self.ship_state['cargo'])
+                available_capacity = MAX_CARGO_CAPACITY - current_cargo_total
+                if available_capacity <= 0:
+                    print("Cargo hold is full. Cannot mine more minerals.")
+                    reward -= 10  # Penalty for attempting to mine when cargo is full
+                    return reward
+                mine_quantity = min(asteroid['quantity'], available_capacity)
+                if mine_quantity <= 0:
+                    print("No available capacity to mine.")
+                    reward -= 10  # Penalty for zero capacity
+                    return reward
                 self.ship_state['miners'][miner_id] = 1
                 mineral_idx = list(MINERALS.keys()).index(asteroid['mineral'])
-                self.ship_state['cargo'][mineral_idx] += asteroid['quantity']
-                print(f"Mined {asteroid['quantity']} units of {asteroid['mineral']}")
-                self.local_state['objects'].pop(target_id)
+                self.ship_state['cargo'][mineral_idx] += mine_quantity
+                print(f"Mined {mine_quantity} units of {asteroid['mineral']}")
+                # Reduce the quantity in the asteroid or remove it if depleted
+                asteroid['quantity'] -= mine_quantity
+                if asteroid['quantity'] <= 0:
+                    self.local_state['objects'].pop(target_id)
                 self.belt_resources[self.ship_state['position']] = self.local_state['objects']
                 # Reset miner status back to inactive
                 self.ship_state['miners'][miner_id] = 0  # Reset miner status here
                 # Provide a reward proportional to the mineral value
-                mineral_value = MINERALS[asteroid['mineral']] * asteroid['quantity']
+                mineral_value = MINERALS[asteroid['mineral']] * mine_quantity
                 reward += mineral_value * 0.1  # Adjust the scaling factor as needed
             else:
                 print("Invalid mining target.")
@@ -331,17 +345,6 @@ class SingleSystemSoloAgentEnv(gym.Env):
             reward -= 10  # Penalty for invalid docking target
         return reward
 
-    def _empty_cargo(self):
-        reward = 0
-        if np.any(self.ship_state['cargo'] > 0):
-            self.ship_state['cargo'] = np.zeros(len(MINERALS), dtype=np.int32)
-            print("Emptied cargo hold.")
-            reward -= 1  # Small penalty for discarding cargo
-        else:
-            print("Cargo hold is already empty.")
-            reward -= 2  # Penalty for unnecessary action
-        return reward
-
     def _sell_minerals(self):
         """Allows the ship to sell minerals at the current station."""
         total_earnings = 0
@@ -359,15 +362,16 @@ class SingleSystemSoloAgentEnv(gym.Env):
                     total_sale = quantity * price
                     total_earnings += total_sale
                     print(f"Sold {quantity} units of {mineral} for {total_sale} ISK at {current_station}")
-                    self.ship_state['cargo'][idx] = 0  # Empty the cargo for this mineral
                     has_sold = True
 
             if has_sold:
                 # Update account balance
                 self.ship_state['account_balance'] += total_earnings
+                # Empty the cargo after selling
+                self.ship_state['cargo'] = np.zeros(len(MINERALS), dtype=np.int32)
                 print(f"Total Earnings: {total_earnings} ISK")
                 print(f"Updated Account Balance: {self.ship_state['account_balance']} ISK")
-                reward += total_earnings * 0.1  # Positive reward proportional to earnings
+                reward += total_earnings * 0.5  # Positive reward proportional to earnings
             else:
                 print("No minerals to sell.")
                 reward -= 10  # Penalty for attempting to sell with empty cargo
@@ -397,7 +401,8 @@ class SingleSystemSoloAgentEnv(gym.Env):
     def get_valid_actions(self):
         valid_action_indices = []
         position = self.ship_state['position']
-        cargo_full = np.any(self.ship_state['cargo'] > 0)
+        cargo_full = np.sum(self.ship_state['cargo']) >= MAX_CARGO_CAPACITY
+        cargo_empty = np.all(self.ship_state['cargo'] == 0)
         energy = self.ship_state['energy']
         local_objects = self.local_state['objects']
 
@@ -408,9 +413,9 @@ class SingleSystemSoloAgentEnv(gym.Env):
                 1: ENERGY_COSTS['mine'],   # Mine
                 2: ENERGY_COSTS['move'],   # Move
                 3: 0,                      # Dock
-                4: 0,                      # Empty Cargo
                 5: 0,                      # Sell Minerals
                 6: 0,                      # Buy Fuel
+                7: 0,                      # Wait
             }
             energy_cost = action_energy_costs.get(action_type, 0)
             if energy < energy_cost:
@@ -428,14 +433,14 @@ class SingleSystemSoloAgentEnv(gym.Env):
                     target = action.get('target')
                     if target >= len(local_objects):
                         is_valid = False
+                    # Check if cargo is full
+                    if cargo_full:
+                        is_valid = False
             elif action_type == 5:  # Sell Minerals
-                if position not in STATIONS or not cargo_full:
+                if position not in STATIONS or cargo_empty:
                     is_valid = False
             elif action_type == 6:  # Buy Fuel
                 if position not in STATIONS:
-                    is_valid = False
-            elif action_type == 4:  # Empty Cargo
-                if not cargo_full:
                     is_valid = False
 
             if is_valid:
@@ -697,9 +702,9 @@ def get_action_description(action):
         1: 'Mine',
         2: 'Move',
         3: 'Dock',
-        4: 'Empty Cargo',
         5: 'Sell Minerals',
-        6: 'Buy Fuel'
+        6: 'Buy Fuel',
+        7: 'Wait'
     }
     action_type = action['action_type']
     action_name = action_names.get(action_type, 'Unknown')

@@ -28,9 +28,9 @@ BATCH_SIZE = 64
 GAMMA = 0.99
 LR = 1e-4
 TARGET_UPDATE = 10
-EPS_START = 1.0
-EPS_END = 0.1
-EPS_DECAY = 10000  # Increased decay rate for smoother epsilon decay
+EPS_START = 0.9
+EPS_END = 0.05
+EPS_DECAY = 5000
 
 # Define the neural network
 class DQN(nn.Module):
@@ -116,6 +116,8 @@ class DQNAgent:
         loss.backward()
         self.optimizer.step()
 
+        return loss
+
 # Preprocessing functions
 def preprocess_state(observation):
     # Normalize energy level and account balance if necessary
@@ -150,6 +152,7 @@ def run_dqn_agent(env, num_episodes=500, render=True):
 
     episode_rewards = []
     account_balances_per_episode = []
+    losses = []
 
     for episode in range(num_episodes):
         observation, info = env.reset()
@@ -160,6 +163,8 @@ def run_dqn_agent(env, num_episodes=500, render=True):
         running = True
 
         account_balances = []
+
+        episode_loss = 0
 
         while not done and running:
             if render:
@@ -188,7 +193,9 @@ def run_dqn_agent(env, num_episodes=500, render=True):
             state = state_next
 
             # Perform one step of the optimization
-            agent.optimize_model()
+            loss = agent.optimize_model()
+            if loss:
+                episode_loss += loss.item()
 
             # Update the target network periodically
             if agent.steps_done % TARGET_UPDATE == 0:
@@ -207,6 +214,9 @@ def run_dqn_agent(env, num_episodes=500, render=True):
                 draw_environment(screen, env, step_number, action_description, episode)
                 clock.tick(60)  # Control the frame rate
 
+        if episode_loss > 0:
+            losses.append(episode_loss)
+
         episode_rewards.append(total_reward)
         account_balances_per_episode.append(account_balances)
         print(f"Episode {episode + 1}/{num_episodes}, Total Reward: {total_reward}")
@@ -218,7 +228,7 @@ def run_dqn_agent(env, num_episodes=500, render=True):
         pygame.quit()
 
     # Return the collected data for plotting
-    return episode_rewards, account_balances_per_episode
+    return episode_rewards, account_balances_per_episode, losses
 
 def evaluate_dqn_agent(env, agent, num_episodes=10):
     """Evaluate the trained DQN agent."""
@@ -305,9 +315,9 @@ def get_action_description(action):
         1: 'Mine',
         2: 'Move',
         3: 'Dock',
-        4: 'Empty Cargo',
         5: 'Sell Minerals',
-        6: 'Buy Fuel'
+        6: 'Buy Fuel',
+        7: 'Wait'
     }
     action_type = action['action_type']
     action_name = action_names.get(action_type, 'Unknown')
@@ -321,7 +331,7 @@ if __name__ == "__main__":
     env = SingleSystemSoloAgentEnv()
 
     # Train the agent
-    episode_rewards, account_balances_per_episode = run_dqn_agent(env, num_episodes=50)
+    episode_rewards, account_balances_per_episode, losses = run_dqn_agent(env, num_episodes=50)
 
     # Load the trained model for evaluation
     observation_space_size = preprocess_state(env.reset()[0]).shape[0]
@@ -372,4 +382,12 @@ if __name__ == "__main__":
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
     plt.title('DQN Agent Evaluation Performance')
+    plt.show()
+
+    # Plot the loss over episodes
+    plt.figure(figsize=(10, 6))
+    plt.plot(losses)
+    plt.xlabel('Episode')
+    plt.ylabel('Loss')
+    plt.title('DQN Agent Training Loss')
     plt.show()
